@@ -630,9 +630,11 @@ void VR_InitInstanceInput( VR_Engine* engine )
 	handPoseRightAction = CreateAction(runningActionSet, XR_ACTION_TYPE_POSE_INPUT, "hand_pose_right", NULL, 1, &rightHandPath);
 
 	XrPath interactionProfilePath = XR_NULL_PATH;
+	XrPath interactionProfilePathValveFrame = XR_NULL_PATH;
 	XrPath interactionProfilePathValveIndex = XR_NULL_PATH;
 	XrPath interactionProfilePathOculusTouch = XR_NULL_PATH;
 	XrPath interactionProfilePathKHRSimple = XR_NULL_PATH;
+	OXR(xrStringToPath(engine->appState.Instance, "/interaction_profiles/valve/frame_controller_valve", &interactionProfilePathValveFrame));
 	OXR(xrStringToPath(engine->appState.Instance, "/interaction_profiles/valve/index_controller", &interactionProfilePathValveIndex));
 	OXR(xrStringToPath(engine->appState.Instance, "/interaction_profiles/oculus/touch_controller", &interactionProfilePathOculusTouch));
 	OXR(xrStringToPath(engine->appState.Instance, "/interaction_profiles/khr/simple_controller", &interactionProfilePathKHRSimple));
@@ -652,7 +654,9 @@ void VR_InitInstanceInput( VR_Engine* engine )
 		// Map bindings
 		XrActionSuggestedBinding bindings[1];
 		int currBinding = 0;
-		bindings[currBinding++] = ActionSuggestedBinding(dummyAction, "/user/hand/right/input/system/click");
+		// Query with a path every profile below supports: the Steam Frame
+		// controllers have no system button on the right hand.
+		bindings[currBinding++] = ActionSuggestedBinding(dummyAction, "/user/hand/right/input/trigger/value");
 
 		XrInteractionProfileSuggestedBinding suggestedBindings = {};
 		suggestedBindings.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
@@ -666,23 +670,25 @@ void VR_InitInstanceInput( VR_Engine* engine )
 		// Index HMD with Index controllers, etc.)
 		const char* systemName = engine->systemProperties.SystemProperties.systemName;
 
-		const XrPath interactionProfiles[3];
-		const char* interactionProfileNames[3];
+		const XrPath interactionProfiles[4];
+		const char* interactionProfileNames[4];
 
 		// Check for Valve Index HMD
 		if (strstr(systemName, "Index") != NULL || strstr(systemName, "index") != NULL || strstr(systemName, "lighthouse") != NULL)
 		{
 			printf("[OpenXR] Detected Valve Index HMD (%s), prioritizing Index controllers\n", systemName);
-			const XrPath profiles[] = { interactionProfilePathValveIndex, interactionProfilePathOculusTouch, interactionProfilePathKHRSimple };
-			const char* names[] = { "Valve Index", "Oculus Quest", "Simple" };
+			const XrPath profiles[] = { interactionProfilePathValveIndex, interactionProfilePathValveFrame, interactionProfilePathOculusTouch, interactionProfilePathKHRSimple };
+			const char* names[] = { "Valve Index", "Steam Frame", "Oculus Quest", "Simple" };
 			memcpy(interactionProfiles, profiles, sizeof(interactionProfiles));
 			memcpy(interactionProfileNames, names, sizeof(interactionProfileNames));
 		}
 		else
 		{
-			// Default to Oculus Touch controllers for all other HMDs
-			const XrPath profiles[] = { interactionProfilePathOculusTouch, interactionProfilePathValveIndex, interactionProfilePathKHRSimple };
-			const char* names[] = { "Oculus Quest", "Valve Index", "Simple" };
+			// Default to the Steam Frame controllers on the headset this build
+			// targets; SteamVR otherwise picks them up through the Oculus Touch
+			// profile and remaps them.
+			const XrPath profiles[] = { interactionProfilePathValveFrame, interactionProfilePathOculusTouch, interactionProfilePathValveIndex, interactionProfilePathKHRSimple };
+			const char* names[] = { "Steam Frame", "Oculus Quest", "Valve Index", "Simple" };
 			memcpy(interactionProfiles, profiles, sizeof(interactionProfiles));
 			memcpy(interactionProfileNames, names, sizeof(interactionProfileNames));
 		}
@@ -715,7 +721,32 @@ void VR_InitInstanceInput( VR_Engine* engine )
 		int currBinding = 0;
 
 		{
-			if (interactionProfilePath == interactionProfilePathValveIndex)
+			if (interactionProfilePath == interactionProfilePathValveFrame)
+			{
+				// Steam Frame Controllers: right A/B/X/Y, left View as menu,
+				// squeeze, capacitive thumbstick touch, no trackpads.
+				bindings[currBinding++] = ActionSuggestedBinding(indexLeftAction, "/user/hand/left/input/trigger/value");
+				bindings[currBinding++] = ActionSuggestedBinding(indexRightAction, "/user/hand/right/input/trigger/value");
+				bindings[currBinding++] = ActionSuggestedBinding(menuAction, "/user/hand/left/input/view/click");
+				bindings[currBinding++] = ActionSuggestedBinding(buttonXAction, "/user/hand/right/input/x/click");
+				bindings[currBinding++] = ActionSuggestedBinding(buttonYAction, "/user/hand/right/input/y/click");
+				bindings[currBinding++] = ActionSuggestedBinding(buttonAAction, "/user/hand/right/input/a/click");
+				bindings[currBinding++] = ActionSuggestedBinding(buttonBAction, "/user/hand/right/input/b/click");
+				bindings[currBinding++] = ActionSuggestedBinding(gripLeftAction, "/user/hand/left/input/squeeze/value");
+				bindings[currBinding++] = ActionSuggestedBinding(gripRightAction, "/user/hand/right/input/squeeze/value");
+				// No trackpad on Frame controllers - trackpad actions stay unbound (same as Touch)
+				bindings[currBinding++] = ActionSuggestedBinding(moveOnLeftJoystickAction, "/user/hand/left/input/thumbstick");
+				bindings[currBinding++] = ActionSuggestedBinding(moveOnRightJoystickAction, "/user/hand/right/input/thumbstick");
+				bindings[currBinding++] = ActionSuggestedBinding(thumbstickLeftClickAction, "/user/hand/left/input/thumbstick/click");
+				bindings[currBinding++] = ActionSuggestedBinding(thumbstickRightClickAction, "/user/hand/right/input/thumbstick/click");
+				bindings[currBinding++] = ActionSuggestedBinding(thumbrestLeftTouchAction, "/user/hand/left/input/thumbstick/touch");
+				bindings[currBinding++] = ActionSuggestedBinding(thumbrestRightTouchAction, "/user/hand/right/input/thumbstick/touch");
+				bindings[currBinding++] = ActionSuggestedBinding(vibrateLeftFeedback, "/user/hand/left/output/haptic");
+				bindings[currBinding++] = ActionSuggestedBinding(vibrateRightFeedback, "/user/hand/right/output/haptic");
+				bindings[currBinding++] = ActionSuggestedBinding(handPoseLeftAction, "/user/hand/left/input/aim/pose");
+				bindings[currBinding++] = ActionSuggestedBinding(handPoseRightAction, "/user/hand/right/input/aim/pose");
+			}
+			else if (interactionProfilePath == interactionProfilePathValveIndex)
 			{
 				bindings[currBinding++] = ActionSuggestedBinding(indexLeftAction, "/user/hand/left/input/trigger/value");
 				bindings[currBinding++] = ActionSuggestedBinding(indexRightAction, "/user/hand/right/input/trigger/value");

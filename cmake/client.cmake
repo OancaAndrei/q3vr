@@ -165,6 +165,11 @@ add_custom_command(TARGET ${CLIENT_BINARY} POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_directory
 		"${CMAKE_SOURCE_DIR}/assets/third_party/demo"
 		"$<TARGET_FILE_DIR:${CLIENT_BINARY}>/baseq3/"
+    # Per-application default settings for Steam Frame (read by SteamVR, must be
+    # at the root of the game package)
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_SOURCE_DIR}/assets/vrpreferences.json"
+    "$<TARGET_FILE_DIR:${CLIENT_BINARY}>/"
 )
 if(ZIP_EXECUTABLE)
     add_dependencies(${CLIENT_BINARY} pakQ3VR)
@@ -191,3 +196,6 @@ install(
     DIRECTORY "${CMAKE_SOURCE_DIR}/assets/third_party/demo/" DESTINATION
 		$<PATH:RELATIVE_PATH,$<TARGET_FILE_DIR:${CLIENT_BINARY}>/baseq3/,${CMAKE_BINARY_DIR}/$<CONFIG>>
 		COMPONENT q3a_demo)
+install(FILES "${CMAKE_SOURCE_DIR}/assets/vrpreferences.json" DESTINATION
+    $<PATH:RELATIVE_PATH,$<TARGET_FILE_DIR:${CLIENT_BINARY}>/,${CMAKE_BINARY_DIR}/$<CONFIG>>
+		COMPONENT game_engine)

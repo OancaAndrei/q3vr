@@ -22,12 +22,22 @@ vr_clientinfo_t vr;
 qboolean vr_initialized = qfalse;
 qboolean vr_shutdown = qfalse;
 
+// Extensions the client cannot run without
 const char* const requiredExtensionNames[] = {
 		XR_KHR_OPENGL_ENABLE_EXTENSION_NAME,
 		XR_EXT_DEBUG_UTILS_EXTENSION_NAME,
 		XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME};
+
+// Extensions that are enabled when the runtime offers them. Vendor interaction
+// profiles must be enabled for the runtime to accept bindings for them, so
+// XR_VALVE_frame_controller_interaction only does anything if we ask for it.
+const char* const optionalExtensionNames[] = {
+		"XR_VALVE_frame_controller_interaction"};
+
 const uint32_t numRequiredExtensions =
 		sizeof(requiredExtensionNames) / sizeof(requiredExtensionNames[0]);
+const uint32_t numOptionalExtensions =
+		sizeof(optionalExtensionNames) / sizeof(optionalExtensionNames[0]);
 
 // Part of init
 void VR_InitInstanceInput( VR_Engine* );
@@ -56,8 +66,46 @@ VR_Engine* VR_Init( void )
 	// Create the OpenXR instance.
 	const char* appName = "Quake 3 Arena";
 	const XrVersion apiVersion = XR_MAKE_VERSION(1, 0, 0);
+
+	// Required extensions plus whichever optional ones this runtime offers.
+	const char* enabledExtensions[16];
+	uint32_t enabledExtensionCount = 0;
+	for (uint32_t i = 0; i < numRequiredExtensions; ++i)
+	{
+		enabledExtensions[enabledExtensionCount++] = requiredExtensionNames[i];
+	}
+
+	uint32_t availableExtensionCount = 0;
+	if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, 0, &availableExtensionCount, NULL))
+		&& availableExtensionCount > 0)
+	{
+		XrExtensionProperties* availableExtensions = calloc(availableExtensionCount, sizeof(XrExtensionProperties));
+		for (uint32_t i = 0; i < availableExtensionCount; ++i)
+		{
+			availableExtensions[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+		}
+
+		if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, availableExtensionCount, &availableExtensionCount, availableExtensions)))
+		{
+			for (uint32_t opt = 0; opt < numOptionalExtensions; ++opt)
+			{
+				for (uint32_t avail = 0; avail < availableExtensionCount; ++avail)
+				{
+					if (strcmp(availableExtensions[avail].extensionName, optionalExtensionNames[opt]) == 0)
+					{
+						fprintf(stderr, "[OpenXR] Enabling optional extension: %s\n", optionalExtensionNames[opt]);
+						enabledExtensions[enabledExtensionCount++] = optionalExtensionNames[opt];
+						break;
+					}
+				}
+			}
+		}
+
+		free(availableExtensions);
+	}
+
 	XR_CHECK(
-		VR_CreateInstance(appName, apiVersion, numRequiredExtensions, requiredExtensionNames, &vr_engine.appState.Instance), 
+		VR_CreateInstance(appName, apiVersion, enabledExtensionCount, enabledExtensions, &vr_engine.appState.Instance),
 		"Failed to create OpenXR instance");
 
 	XrInstanceProperties instanceInfo;
