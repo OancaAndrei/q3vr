@@ -37,6 +37,9 @@ uint32_t viewCount = 2;
 uint32_t swapchainColorIndex = 0;
 qboolean overlayAcquiredThisFrame = qfalse;
 
+// XrViewStateFlags reported for the views located this frame (see VR_EndFrame)
+XrViewStateFlags viewStateFlagsThisFrame = 0;
+
 void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter);
 void VR_Renderer_EndFrame(VR_Engine* engine);
 void VR_Recenter(VR_Engine* engine, XrTime predictedDisplayTime);
@@ -122,6 +125,11 @@ void VR_ProcessFrame( VR_Engine* engine )
 		// If we haven't called Com_Frame() then let's at least process input
 		// (specifically SDL events) so that app won't appear as stuck/deadlocked
 		IN_Frame();
+
+		// IN_Frame() queues input events; Com_Frame() is what drains them, and
+		// this branch exists precisely for when it is not called. Without
+		// draining here the queue fills up and every event after that is dropped.
+		Com_EventLoop();
 		return;
 	}
 
@@ -175,6 +183,8 @@ void VR_Renderer_BeginFrame(VR_Engine* engine, XrBool32 needsRecenter)
 		engine->appState.CurrentSpace,
 		views,
 		&viewCount);
+
+	viewStateFlagsThisFrame = viewState.viewStateFlags;
 
 	// Update HMD position/views
 	IN_VRUpdateHMD(views, viewCount, &fov);

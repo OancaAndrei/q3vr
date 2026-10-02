@@ -1989,7 +1989,24 @@ void Com_QueueEvent( int time, sysEventType_t type, int value, int value2, int p
 
 	if ( eventHead - eventTail >= MAX_QUEUED_EVENTS )
 	{
-		Com_Printf("Com_QueueEvent: overflow\n");
+		// Report at most once a second. A flood (thousands of events per second,
+		// e.g. from high frequency controller axis events) previously printed one
+		// line per dropped event, which costs significant CPU on its own, and the
+		// storm hid which event type was causing it.
+		static int lastOverflowReportMs = 0;
+		static int droppedSinceReport = 0;
+		const int nowMs = Sys_Milliseconds();
+
+		droppedSinceReport++;
+
+		if ( nowMs - lastOverflowReportMs >= 1000 )
+		{
+			Com_Printf( "Com_QueueEvent: overflow (%i events dropped in %ims, latest dropped type %i)\n",
+				droppedSinceReport, nowMs - lastOverflowReportMs, (int)type );
+			droppedSinceReport = 0;
+			lastOverflowReportMs = nowMs;
+		}
+
 		// we are discarding an event, but don't leak memory
 		if ( ev->evPtr )
 		{

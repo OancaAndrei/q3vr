@@ -88,13 +88,21 @@ void _VR_HandleSessionStateChange(VR_App* app, XrSessionState newState)
 		case XR_SESSION_STATE_VISIBLE:
 			app->Focused = XR_FALSE;
 			app->Visible = XR_TRUE;
+			app->VisibleSinceMs = Sys_Milliseconds();
 			break;
 
 		case XR_SESSION_STATE_SYNCHRONIZED:
 			if (app->Visible)
 			{
-				// Loss of visibility, let's pause the game
-				VR_Gameplay_OpenMenuAndPauseIfPossible();
+				// Loss of visibility, let's pause the game - but only if it stayed
+				// visible for a moment. Brief blips (the system UI or dashboard
+				// taking over, which happens repeatedly during normal use) would
+				// otherwise open the menu over and over, and with it the flat
+				// virtual screen, pausing the game each time.
+				if (Sys_Milliseconds() - app->VisibleSinceMs >= 1000)
+				{
+					VR_Gameplay_OpenMenuAndPauseIfPossible();
+				}
 			}
 			app->Visible = XR_FALSE;
 			break;
@@ -111,6 +119,21 @@ void _VR_HandleSessionStateChange(VR_App* app, XrSessionState newState)
 			CHECK(app->SessionActive, "");
 			XR_CHECK(VR_EndSession(app->Session), "Failed to end XR session");
 			app->SessionActive = XR_FALSE;
+			break;
+
+		case XR_SESSION_STATE_LOSS_PENDING:
+			// The runtime is losing the session. Stop submitting frames: calling
+			// frame functions on a dead session leaves the frame loop blocked on
+			// it, which presents as a hung client.
+			app->SessionActive = XR_FALSE;
+			app->Focused = XR_FALSE;
+			app->Visible = XR_FALSE;
+			break;
+
+		case XR_SESSION_STATE_EXITING:
+			// The runtime is asking the application to exit. Left unhandled, the
+			// client stayed alive with no session and never exited.
+			Com_Quit_f();
 			break;
 
 		default:

@@ -73,6 +73,11 @@ typedef struct
 	GLboolean Focused;
 	GLboolean Visible;
 
+	// Millisecond timestamp of when the session last started being visible, used
+	// to ignore brief visibility blips (e.g. the system UI taking over) instead
+	// of reacting to every one of them.
+	int VisibleSinceMs;
+
 	XrDebugUtilsMessengerEXT DebugUtilsMessenger;
 
 	XrSpace HeadSpace;
