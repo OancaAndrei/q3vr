@@ -36,6 +36,29 @@ static float	s_flipMatrix[16] = {
 	0, 0, 0, 1
 };
 
+// 2D scratch target state (see RB_Get2DScratch below).
+//
+// The two 2D passes need separate targets: the HUD pass runs nested inside the
+// screen-overlay pass and each clears the target it draws into, so a shared
+// target loses whatever the other pass had drawn.
+typedef struct {
+	GLuint fbo;
+	GLuint texture;
+	GLuint depth;
+	GLuint layerFbo;
+	int width;
+	int height;
+} rb2DScratch_t;
+
+#define RB_2D_SCRATCH_OVERLAY 0
+#define RB_2D_SCRATCH_HUD 1
+#define RB_2D_SCRATCH_SLOTS 2
+
+static rb2DScratch_t rb2DScratch[RB_2D_SCRATCH_SLOTS];
+static qboolean rbHudUsing2DScratch;
+static qboolean rbOverlayUsing2DScratch;
+static GLuint rbOverlayBackupFrameBuffer;
+
 
 /*
 ** GL_BindToTMU
@@ -1844,6 +1867,107 @@ RB_ScreenOverlayBuffer
 Switches rendering to/from the screen overlay framebuffer for quad layer content.
 ====================
 */
+// ---------------------------------------------------------------------------
+// 2D scratch target
+//
+// Every shader in this engine carries a multiview preamble (see the vertex
+// shader header in tr_glsl.c), so 2D draws go through a multiview program.
+// Multiview draws are only valid against a framebuffer whose attachments were
+// made with glFramebufferTextureMultiviewOVR and have num_views layers, the way
+// VR_CreateImageView attaches the eye images. The HUD texture and the screen
+// overlay swapchain image are single layer, so 2D content is drawn into this
+// scratch instead and blitted into the real target.
+// ---------------------------------------------------------------------------
+static qboolean RB_Get2DScratch( rb2DScratch_t *s, int width, int height )
+{
+	if ( width <= 0 || height <= 0 )
+	{
+		return qfalse;
+	}
+
+	// Grow only; the two passes use different sizes.
+	if ( s->fbo != 0 && s->width >= width && s->height >= height )
+	{
+		return qtrue;
+	}
+
+	if ( s->texture != 0 )
+	{
+		qglDeleteTextures( 1, &s->texture );
+		s->texture = 0;
+	}
+	if ( s->fbo != 0 )
+	{
+		qglDeleteFramebuffers( 1, &s->fbo );
+		s->fbo = 0;
+	}
+	if ( s->depth != 0 )
+	{
+		qglDeleteTextures( 1, &s->depth );
+		s->depth = 0;
+	}
+	if ( s->layerFbo != 0 )
+	{
+		qglDeleteFramebuffers( 1, &s->layerFbo );
+		s->layerFbo = 0;
+	}
+
+	qglGenTextures( 1, &s->texture );
+	qglBindTexture( GL_TEXTURE_2D_ARRAY, s->texture );
+	qglTexStorage3D( GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, width, height, 2 );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+	qglGenTextures( 1, &s->depth );
+	qglBindTexture( GL_TEXTURE_2D_ARRAY, s->depth );
+	qglTexStorage3D( GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT24, width, height, 2 );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	qglTexParameteri( GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+
+	qglGenFramebuffers( 1, &s->fbo );
+	qglBindFramebuffer( GL_FRAMEBUFFER, s->fbo );
+	// Both attachments go through the multiview call, exactly like
+	// VR_CreateImageView does for the eye images.
+	qglFramebufferTextureMultiviewOVR( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, s->texture, 0, 0, 2 );
+	qglFramebufferTextureMultiviewOVR( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, s->depth, 0, 0, 2 );
+
+	if ( qglCheckFramebufferStatus( GL_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE )
+	{
+		fprintf( stderr, "[VR] 2D scratch target incomplete; 2D content falls back to direct rendering\n" );
+		qglDeleteFramebuffers( 1, &s->fbo );
+		s->fbo = 0;
+		qglDeleteTextures( 1, &s->texture );
+		s->texture = 0;
+		qglDeleteTextures( 1, &s->depth );
+		s->depth = 0;
+		qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+		return qfalse;
+	}
+
+	// A second framebuffer over the same texture, attaching layer 0 the plain
+	// way. Copies must go through this one: blitting from (or to) a framebuffer
+	// whose attachment was made with the multiview call produces nothing.
+	qglGenFramebuffers( 1, &s->layerFbo );
+	qglBindFramebuffer( GL_FRAMEBUFFER, s->layerFbo );
+	qglFramebufferTextureLayer( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, s->texture, 0, 0 );
+
+	if ( qglCheckFramebufferStatus( GL_FRAMEBUFFER ) != GL_FRAMEBUFFER_COMPLETE )
+	{
+		fprintf( stderr, "[VR] 2D scratch layer framebuffer incomplete\n" );
+		qglDeleteFramebuffers( 1, &s->layerFbo );
+		s->layerFbo = 0;
+	}
+
+	s->width = width;
+	s->height = height;
+	qglBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	return qtrue;
+}
+
 const void* RB_ScreenOverlayBuffer( const void* data ) {
 	const screenOverlayBufferCommand_t *cmd = data;
 
@@ -1860,8 +1984,9 @@ const void* RB_ScreenOverlayBuffer( const void* data ) {
 		// Bind screen overlay framebuffer if available
 		if (tr.vrParms.screenOverlayBuffer != 0)
 		{
-			// Save current framebuffer
-			tr.backupFrameBuffer = tr.renderFbo->frameBuffer;
+			// Save current framebuffer (separate slot: the HUD pass nests inside
+			// this one and overwrites tr.backupFrameBuffer)
+			rbOverlayBackupFrameBuffer = tr.renderFbo->frameBuffer;
 
 			// Bind overlay framebuffer
 			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.vrParms.screenOverlayBuffer);
@@ -1888,16 +2013,52 @@ const void* RB_ScreenOverlayBuffer( const void* data ) {
 				qglClearColor(0.0f, 0.0f, 0.0f, 0.0f);  // Transparent black
 				qglClear(GL_COLOR_BUFFER_BIT);
 			}
+
+			// 2D content (reticle, damage effects, HUD in overlay mode) is drawn
+			// into the multiview capable scratch and copied into this overlay image
+			// on the way out - drawing it here directly produces nothing, because
+			// this image is single layer (see RB_Get2DScratch).
+			rbOverlayUsing2DScratch = qfalse;
+			if (RB_Get2DScratch(&rb2DScratch[RB_2D_SCRATCH_OVERLAY], tr.vrParms.screenOverlayWidth, tr.vrParms.screenOverlayHeight))
+			{
+				const int w = tr.vrParms.screenOverlayWidth;
+				const int h = tr.vrParms.screenOverlayHeight;
+				// Start from the overlay image's current contents: everything drawn
+				// here is copied back over the whole image, so a pass with nothing
+				// to draw must not clear it.
+				while ( qglGetError() != GL_NO_ERROR ) { }
+
+				qglBlitNamedFramebuffer(tr.vrParms.screenOverlayBuffer, rb2DScratch[RB_2D_SCRATCH_OVERLAY].layerFbo,
+					0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+				// The 2D draw paths call FBO_Bind(tr.renderFbo) for every draw, so
+				// point that at the scratch as well, otherwise they re-bind the eye
+				// image and undo this.
+				GL_BindFramebuffer(GL_FRAMEBUFFER, rb2DScratch[RB_2D_SCRATCH_OVERLAY].fbo);
+				tr.renderFbo->frameBuffer = (GLuint)rb2DScratch[RB_2D_SCRATCH_OVERLAY].fbo;
+				rbOverlayUsing2DScratch = qtrue;
+			}
 		}
 	}
 	else if (glState.isDrawingScreenOverlay)
 	{
 		glState.isDrawingScreenOverlay = qfalse;
 
+		// Copy the finished 2D content out of the scratch into the overlay image
+		// that the quad layer shows
+		if (rbOverlayUsing2DScratch)
+		{
+			rbOverlayUsing2DScratch = qfalse;
+			qglBlitNamedFramebuffer(rb2DScratch[RB_2D_SCRATCH_OVERLAY].layerFbo, tr.vrParms.screenOverlayBuffer,
+				0, 0, tr.vrParms.screenOverlayWidth, tr.vrParms.screenOverlayHeight,
+				0, 0, tr.vrParms.screenOverlayWidth, tr.vrParms.screenOverlayHeight,
+				GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		}
+
 		// Restore original framebuffer
 		if (tr.vrParms.screenOverlayBuffer != 0)
 		{
-			tr.renderFbo->frameBuffer = tr.backupFrameBuffer;
+			tr.renderFbo->frameBuffer = rbOverlayBackupFrameBuffer;
 			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.renderFbo->frameBuffer);
 		}
 	}
@@ -1930,13 +2091,25 @@ const void* RB_HUDBuffer( const void* data ) {
 		{
 			//keep record of current render fbo and switch to the hud buffer
 			tr.backupFrameBuffer = tr.renderFbo->frameBuffer;
-			tr.renderFbo->frameBuffer = tr.hudFbo->frameBuffer;
+
+			while ( qglGetError() != GL_NO_ERROR ) { }
+
+			// The HUD texture is single layer, so multiview 2D draws straight into
+			// it are rejected and never appear (see RB_Get2DScratch). Draw into the
+			// scratch when it is available and copy the result into the HUD texture
+			// afterwards; otherwise fall back to the old direct behaviour.
+			rbHudUsing2DScratch = RB_Get2DScratch( &rb2DScratch[RB_2D_SCRATCH_HUD], tr.hudImage->width, tr.hudImage->height );
+			tr.renderFbo->frameBuffer = rbHudUsing2DScratch ? (GLuint)rb2DScratch[RB_2D_SCRATCH_HUD].fbo : tr.hudFbo->frameBuffer;
 
 			// Render to framebuffer
-			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.hudFbo->frameBuffer);
-			qglBindRenderbuffer(GL_RENDERBUFFER, 0);
-			qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tr.hudImage->texnum, 0);
-			qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tr.hudDepthImage->texnum, 0);
+			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.renderFbo->frameBuffer);
+
+			if ( !rbHudUsing2DScratch )
+			{
+				qglBindRenderbuffer(GL_RENDERBUFFER, 0);
+				qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tr.hudImage->texnum, 0);
+				qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tr.hudDepthImage->texnum, 0);
+			}
 
 			GLenum result = qglCheckFramebufferStatus(GL_FRAMEBUFFER);
 			if (result != GL_FRAMEBUFFER_COMPLETE)
@@ -1957,6 +2130,17 @@ const void* RB_HUDBuffer( const void* data ) {
 
 		if (vr_currentHudDrawStatus->integer != 2)
 		{
+			// Copy the finished HUD out of the scratch into the HUD texture that
+			// the in-world HUD sprite samples
+			if (rbHudUsing2DScratch)
+			{
+				rbHudUsing2DScratch = qfalse;
+				qglBlitNamedFramebuffer(rb2DScratch[RB_2D_SCRATCH_HUD].layerFbo, tr.hudFbo->frameBuffer,
+					0, 0, tr.hudImage->width, tr.hudImage->height,
+					0, 0, tr.hudImage->width, tr.hudImage->height,
+					GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			}
+
 			//restore the true render fbo
 			tr.renderFbo->frameBuffer = tr.backupFrameBuffer;
 			GL_BindFramebuffer(GL_FRAMEBUFFER, tr.renderFbo->frameBuffer);
