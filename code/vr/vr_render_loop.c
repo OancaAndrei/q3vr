@@ -98,7 +98,12 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 	// OR for full scene when weapon is zoomed (mono rendering via quad layer)
 	// Using XR_EYE_VISIBILITY_BOTH - both eyes see the same quad at the same position.
 	XrCompositionLayerQuad quad_layer = {};
-	qboolean useQuadForScene = vr.weapon_zoomed;  // When zoomed, quad layer IS the scene
+	// A quad submitted as the only layer with an invalid view pose is dropped by
+	// the compositor, leaving the view uncovered, so it can only stand in for the
+	// scene while the runtime reports the poses as valid.
+	extern XrViewStateFlags viewStateFlagsThisFrame;
+	const qboolean trackingValid = (viewStateFlagsThisFrame & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+	qboolean useQuadForScene = vr.weapon_zoomed && trackingValid;
 
 	// SP intermission overlay anchoring - track state for world-fixed UI
 	static XrPosef sp_intermission_anchor_pose;
@@ -123,11 +128,32 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 	{
 		float distance = 0.5f;
 
-		// Calculate the edges at the given distance using the averaged FOV
-		float leftEdge = tanf(fov.angleLeft) * distance;
-		float rightEdge = tanf(fov.angleRight) * distance;
-		float bottomEdge = tanf(fov.angleDown) * distance;
-		float topEdge = tanf(fov.angleUp) * distance;
+		// Calculate the edges at the given distance, covering the union of both
+		// eyes' FOVs. Each eye's frustum is asymmetric, so the averaged FOV leaves
+		// the outer periphery of each eye outside the quad, and the compositor
+		// fills that with passthrough.
+		float leftTan = tanf(views[0].fov.angleLeft);
+		float rightTan = tanf(views[0].fov.angleRight);
+		float downTan = tanf(views[0].fov.angleDown);
+		float upTan = tanf(views[0].fov.angleUp);
+
+		for (uint32_t eye = 1; eye < viewCount; eye++)
+		{
+			const float eyeLeft = tanf(views[eye].fov.angleLeft);
+			const float eyeRight = tanf(views[eye].fov.angleRight);
+			const float eyeDown = tanf(views[eye].fov.angleDown);
+			const float eyeUp = tanf(views[eye].fov.angleUp);
+
+			if (eyeLeft < leftTan) leftTan = eyeLeft;
+			if (eyeRight > rightTan) rightTan = eyeRight;
+			if (eyeDown < downTan) downTan = eyeDown;
+			if (eyeUp > upTan) upTan = eyeUp;
+		}
+
+		float leftEdge = leftTan * distance;
+		float rightEdge = rightTan * distance;
+		float bottomEdge = downTan * distance;
+		float topEdge = upTan * distance;
 
 		// The FOV center (where screen center should appear) is the midpoint
 		float fovCenterX = (leftEdge + rightEdge) / 2.0f;
@@ -256,14 +282,23 @@ void VR_EndFrame(XrSession session, VR_SwapchainInfos* swapchains, XrView* views
 	const XrCompositionLayerBaseHeader* layers[2];
 	int layerCount = 0;
 
-	// When weapon is zoomed, skip projection layer - use quad layer only for true mono
-	if (viewCount > 0 && !useQuadForScene)
+	// Always submit the projection layer: a quad with no content is dropped by the
+	// compositor, which shows as passthrough, and an opaque quad covers the
+	// projection anyway.
+	if (viewCount > 0)
 	{
 		layers[layerCount++] = (const XrCompositionLayerBaseHeader*)&projection_layer;
 	}
 	if (hasScreenOverlay && swapchains->screenOverlay.swapchain != XR_NULL_HANDLE && viewCount >= 2)
 	{
 		layers[layerCount++] = (const XrCompositionLayerBaseHeader*)&quad_layer;
+	}
+
+	// Never submit zero layers: with nothing submitted the compositor has nothing
+	// to draw, which the user sees as passthrough.
+	if (layerCount == 0 && viewCount > 0)
+	{
+		layers[layerCount++] = (const XrCompositionLayerBaseHeader*)&projection_layer;
 	}
 
 	XrFrameEndInfo endFrameInfo = {};
